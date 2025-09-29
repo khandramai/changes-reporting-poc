@@ -27,22 +27,30 @@ jobs:
   diff:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (called workflow repo, full history & tags)
+      - name: Checkout called workflow repo
         uses: actions/checkout@v4
         with:
           repository: ${{ github.workflow_repository }}
           ref: ${{ github.workflow_sha }}
           fetch-depth: 0
-          fetch-tags: true
+          fetch-tags: false
+          persist-credentials: true
 
-      - name: Ensure tags are fetched
-        run: git fetch --tags --force
+      - name: Fetch all branches and tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global gc.auto 0
+          git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/${{ github.workflow_repository }}.git"
+          git fetch --prune --force origin \
+            "+refs/heads/*:refs/remotes/origin/*" \
+            "+refs/tags/*:refs/tags/*"
 
       - name: Determine BASE/HEAD
         id: refs
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -euo pipefail
           case "${{ github.event_name }}" in
             push)
               BASE="${{ github.event.before }}"
@@ -87,13 +95,13 @@ jobs:
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
           echo "head=$HEAD" >> "$GITHUB_OUTPUT"
 
-      - name: Install jq (quiet)
+      - name: Install jq
         run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
 
       - name: Build report (summary only)
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -euo pipefail
           BASE="${{ steps.refs.outputs.base }}"
           HEAD="${{ steps.refs.outputs.head }}"
           MAX_LINES=500
