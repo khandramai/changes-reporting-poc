@@ -6,6 +6,7 @@ on:
     paths:
       - "ramls/*.json"
   pull_request:
+    types: [opened, synchronize, reopened, edited]
     branches: ["**"]
     paths:
       - "ramls/*.json"
@@ -14,7 +15,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: read_
+  contents: read
   pull-requests: write
 
 concurrency:
