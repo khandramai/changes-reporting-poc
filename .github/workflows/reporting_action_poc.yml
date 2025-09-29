@@ -27,18 +27,22 @@ jobs:
   diff:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (full history incl. tags)
+      - name: Checkout (called workflow repo, full history & tags)
         uses: actions/checkout@v4
         with:
+          repository: ${{ github.workflow_repository }}
+          ref: ${{ github.workflow_sha }}
           fetch-depth: 0
           fetch-tags: true
+
+      - name: Ensure tags are fetched
+        run: git fetch --tags --force
 
       - name: Determine BASE/HEAD
         id: refs
         shell: bash
         run: |
           set -Eeuo pipefail
-
           case "${{ github.event_name }}" in
             push)
               BASE="${{ github.event.before }}"
@@ -79,7 +83,6 @@ jobs:
               BASE="$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD | tail -n1)"
               ;;
           esac
-
           git rev-parse "$BASE" "$HEAD" >/dev/null
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
           echo "head=$HEAD" >> "$GITHUB_OUTPUT"
@@ -94,7 +97,6 @@ jobs:
           BASE="${{ steps.refs.outputs.base }}"
           HEAD="${{ steps.refs.outputs.head }}"
           MAX_LINES=500
-
           mkfile() { mktemp -t "$1.XXXXXX"; }
           truncate_or_all() {
             local LINES
@@ -106,9 +108,7 @@ jobs:
               cat "$1"
             fi
           }
-
           git -c diff.renames=true diff --name-status -M "$BASE" "$HEAD" -- ramls/*.json > /tmp/status.txt || true
-
           {
             echo "## JSON Schema Changes"
             echo
@@ -116,25 +116,21 @@ jobs:
             echo "- Head: \`$HEAD\`"
             echo
           } >> "$GITHUB_STEP_SUMMARY"
-
           if [[ ! -s /tmp/status.txt ]]; then
             echo "_No JSON schema changes detected in \`ramls/\` (top-level)._ " >> "$GITHUB_STEP_SUMMARY"
             cat "$GITHUB_STEP_SUMMARY" > report.md
             exit 0
           fi
-
           {
             echo "### Changed files"
             echo
             echo "| Status | File (HEAD) |"
             echo "|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
-
           CHANGES=()
           while IFS= read -r LINE; do
             CHANGES+=("$LINE")
           done < /tmp/status.txt
-
           for LINE in "${CHANGES[@]}"; do
             IFS=$'\t' read -r S A B <<< "$LINE"
             FILE="$A"
@@ -153,33 +149,27 @@ jobs:
             esac
             echo "| $STATUS | \`$FILE\` |" >> "$GITHUB_STEP_SUMMARY"
           done
-
           {
             echo
             echo "### Diffs (normalized first, fallback to raw if empty)"
             echo
           } >> "$GITHUB_STEP_SUMMARY"
-
           for LINE in "${CHANGES[@]}"; do
             IFS=$'\t' read -r S A B <<< "$LINE"
             BASE_PATH="$A"; HEAD_PATH="$A"; TITLE="$A"
             if [[ "$S" == R* ]]; then
               BASE_PATH="$A"; HEAD_PATH="$B"; TITLE="$B"
             fi
-
             echo "#### \`$TITLE\`" >> "$GITHUB_STEP_SUMMARY"
-
             BASE_RAW="$(mkfile base_raw)"
             HEAD_RAW="$(mkfile head_raw)"
             git show "$BASE:$BASE_PATH" 2>/dev/null > "$BASE_RAW" || true
             git show "$HEAD:$HEAD_PATH" 2>/dev/null > "$HEAD_RAW" || true
-
             BASE_NORM="$(mkfile base_json)"
             HEAD_NORM="$(mkfile head_json)"
             VALID_BASE=1; VALID_HEAD=1
             if ! jq -S . < "$BASE_RAW" > "$BASE_NORM" 2>/dev/null; then VALID_BASE=0; echo '{}' > "$BASE_NORM"; fi
             if ! jq -S . < "$HEAD_RAW" > "$HEAD_NORM" 2>/dev/null; then VALID_HEAD=0; echo '{}' > "$HEAD_NORM"; fi
-
             NORM_DIFF="$(mkfile norm_diff)"
             if ! diff -u --label "$TITLE (base)" --label "$TITLE (head)" "$BASE_NORM" "$HEAD_NORM" > "$NORM_DIFF"; then
               echo '```diff' >> "$GITHUB_STEP_SUMMARY"
@@ -189,7 +179,6 @@ jobs:
               [[ $VALID_BASE -eq 0 || $VALID_HEAD -eq 0 ]] && echo "_Note: one of the versions is not valid JSON — raw diff only._" >> "$GITHUB_STEP_SUMMARY"
               echo "_No structural changes (after normalization)_" >> "$GITHUB_STEP_SUMMARY"
               echo >> "$GITHUB_STEP_SUMMARY"
-
               RAW_DIFF="$(mkfile raw_diff)"
               diff -u --label "$TITLE (base)" --label "$TITLE (head)" "$BASE_RAW" "$HEAD_RAW" > "$RAW_DIFF" || true
               echo "_Showing raw textual diff (formatting/whitespace changes may appear)_" >> "$GITHUB_STEP_SUMMARY"
@@ -197,10 +186,8 @@ jobs:
               truncate_or_all "$RAW_DIFF" >> "$GITHUB_STEP_SUMMARY"
               echo '```' >> "$GITHUB_STEP_SUMMARY"
             fi
-
             echo >> "$GITHUB_STEP_SUMMARY"
           done
-
           cat "$GITHUB_STEP_SUMMARY" > report.md
 
       - name: Ensure report exists
