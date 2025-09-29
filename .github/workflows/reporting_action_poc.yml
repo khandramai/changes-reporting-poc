@@ -6,14 +6,19 @@ on:
     paths:
       - "ramls/*.json"
   pull_request:
-    types: [opened, synchronize, reopened, edited]
     branches: ["**"]
     paths:
       - "ramls/*.json"
   release:
     types: [created, published]
-  workflow_dispatch: {}
-  workflow_call: {}
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Optional base ref (tag/commit)"
+        required: false
+      head:
+        description: "Optional head ref (tag/commit)"
+        required: false
 
 permissions:
   contents: read
@@ -26,214 +31,193 @@ concurrency:
 jobs:
   diff:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Resolve called repo/ref
-        id: meta
-        shell: bash
-        run: |
-          set -euo pipefail
-          WF_REF="${{ github.workflow_ref }}"
-          if [[ -n "$WF_REF" && "$WF_REF" == *"/.github/workflows/"* && "$WF_REF" == *"@"* ]]; then
-            CALLED_REPO="${WF_REF%%/.github/workflows/*}"
-            CALLED_REF="${WF_REF#*@}"
-          else
-            CALLED_REPO="${{ github.repository }}"
-            CALLED_REF="${{ github.ref }}"
-          fi
-          echo "repo=$CALLED_REPO" >> "$GITHUB_OUTPUT"
-          echo "ref=$CALLED_REF"   >> "$GITHUB_OUTPUT"
-
-      - name: Install jq
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
-
-      - name: Resolve latest tags via API (for workflow_call/dispatch)
-        if: ${{ github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' }}
-        id: apitags
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          REPO="${{ steps.meta.outputs.repo }}"
-          api() { curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$1"; }
-          tags_json="$(api "https://api.github.com/repos/${REPO}/git/refs/tags?per_page=100")"
-          count="$(jq 'length' <<<"$tags_json")"
-          if [[ "$count" -lt 2 ]]; then
-            echo "Need at least two tags in repo to generate report (found: $count)." >&2
-            exit 1
-          fi
-          tmp="$(mktemp)"
-          while IFS=$'\t' read -r ref sha; do
-            tag="${ref#refs/tags/}"
-            tag_obj="$(api "https://api.github.com/repos/${REPO}/git/tags/${sha}" || true)"
-            if jq -e '.object.sha? // empty' >/dev/null 2>&1 <<<"$tag_obj"; then
-              csha="$(jq -r '.object.sha' <<<"$tag_obj")"
-            else
-              csha="$sha"
-            fi
-            commit_json="$(api "https://api.github.com/repos/${REPO}/commits/${csha}")"
-            cdate="$(jq -r '.commit.committer.date // .commit.author.date' <<<"$commit_json")"
-            printf "%s\t%s\n" "$tag" "$cdate" >> "$tmp"
-          done < <(jq -r '.[] | [.ref, .object.sha] | @tsv' <<<"$tags_json")
-          sort -r -k2,2 "$tmp" | head -n2 > /tmp/top2
-          HEAD_TAG="$(sed -n '1s/\t.*//p' /tmp/top2)"
-          BASE_TAG="$(sed -n '2s/\t.*//p' /tmp/top2)"
-          echo "head=${HEAD_TAG}" >> "$GITHUB_OUTPUT"
-          echo "base=${BASE_TAG}" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout (git mode)
-        if: ${{ github.event_name != 'workflow_call' && github.event_name != 'workflow_dispatch' }}
+      - name: Checkout (full history incl. tags)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Determine BASE/HEAD (git mode)
-        if: ${{ github.event_name != 'workflow_call' && github.event_name != 'workflow_dispatch' }}
+      - name: Determine BASE/HEAD
         id: refs
         shell: bash
         run: |
           set -Eeuo pipefail
+          BASE_IN="${{ github.event.inputs.base || '' }}"
+          HEAD_IN="${{ github.event.inputs.head || '' }}"
+
           case "${{ github.event_name }}" in
             push)
-              BASE="${{ github.event.before }}"
-              HEAD="${GITHUB_SHA}"
+              BASE="${BASE_IN:-${{ github.event.before }}}"
+              HEAD="${HEAD_IN:-${GITHUB_SHA}}"
               ;;
             pull_request)
-              BASE="${{ github.event.pull_request.base.sha }}"
-              HEAD="${{ github.event.pull_request.head.sha }}"
+              BASE="${BASE_IN:-${{ github.event.pull_request.base.sha }}}"
+              HEAD="${HEAD_IN:-${{ github.event.pull_request.head.sha }}}"
               ;;
             release)
               CUR_TAG="${{ github.event.release.tag_name }}"
-              HEAD="$CUR_TAG"
+              HEAD="${HEAD_IN:-$CUR_TAG}"
               PREV_TAG="$(git tag --sort=-creatordate | grep -A1 "^${CUR_TAG}$" | tail -n1 || true)"
               [[ -z "$PREV_TAG" ]] && PREV_TAG="$(git tag --sort=creatordate | head -n1 || true)"
               [[ -z "$PREV_TAG" ]] && PREV_TAG="$(git rev-list --max-parents=0 HEAD | tail -n1)"
-              BASE="$PREV_TAG"
+              BASE="${BASE_IN:-$PREV_TAG}"
+              ;;
+            workflow_dispatch)
+              HEAD="${HEAD_IN:-${GITHUB_SHA}}"
+              if [[ -n "$BASE_IN" ]]; then
+                BASE="$BASE_IN"
+              else
+                BASE="$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD | tail -n1)"
+              fi
               ;;
             *)
-              BASE="$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD | tail -n1)"
-              HEAD="$(git rev-parse HEAD)"
+              HEAD="${HEAD_IN:-${GITHUB_SHA}}"
+              BASE="${BASE_IN:-$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD | tail -n1)}"
               ;;
           esac
-          git rev-parse "$BASE" >/dev/null 2>&1 || { echo "Base ref not resolvable: $BASE" >&2; exit 1; }
-          git rev-parse "$HEAD" >/dev/null 2>&1 || { echo "Head ref not resolvable: $HEAD" >&2; exit 1; }
+
+          git rev-parse "$BASE" "$HEAD" >/dev/null
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
           echo "head=$HEAD" >> "$GITHUB_OUTPUT"
 
-      - name: Build report (git mode)
-        if: ${{ github.event_name != 'workflow_call' && github.event_name != 'workflow_dispatch' }}
+      - name: Install jq (quiet)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
+
+      - name: Build report (summary only, refactored)
         shell: bash
         run: |
           set -Eeuo pipefail
+
           BASE="${{ steps.refs.outputs.base }}"
           HEAD="${{ steps.refs.outputs.head }}"
           MAX_LINES=500
+
+          # Helpers
           mkfile() { mktemp -t "$1.XXXXXX"; }
-          truncate_or_all() { local L; L=$(wc -l < "$1" || echo 0); if (( L > MAX_LINES )); then head -n "$MAX_LINES" "$1"; echo "_Output truncated to ${MAX_LINES} lines._"; else cat "$1"; fi }
+          truncate_or_all() {  # $1=file
+            local LINES
+            LINES=$(wc -l < "$1" || echo 0)
+            if (( LINES > MAX_LINES )); then
+              head -n "$MAX_LINES" "$1"
+              echo "_Output truncated to ${MAX_LINES} lines._"
+            else
+              cat "$1"
+            fi
+          }
+
+          # Detect changes (top-level only)
           git -c diff.renames=true diff --name-status -M "$BASE" "$HEAD" -- ramls/*.json > /tmp/status.txt || true
-          { echo "## JSON Schema Changes"; echo; echo "- Base: \`$BASE\`"; echo "- Head: \`$HEAD\`"; echo; } >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "## JSON Schema Changes"
+            echo
+            echo "- Base: \`$BASE\`"
+            echo "- Head: \`$HEAD\`"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
           if [[ ! -s /tmp/status.txt ]]; then
             echo "_No JSON schema changes detected in \`ramls/\` (top-level)._ " >> "$GITHUB_STEP_SUMMARY"
+            # create report.md before exiting (so PR comment step has content)
             cat "$GITHUB_STEP_SUMMARY" > report.md
             exit 0
           fi
-          { echo "### Changed files"; echo; echo "| Status | File (HEAD) |"; echo "|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
-          mapfile -t CHANGES < /tmp/status.txt
+
+          {
+            echo "### Changed files"
+            echo
+            echo "| Status | File (HEAD) |"
+            echo "|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Read status lines into array (без mapfile)
+          CHANGES=()
+          while IFS= read -r LINE; do
+            CHANGES+=("$LINE")
+          done < /tmp/status.txt
+
+          # Table rows with human-readable statuses
           for LINE in "${CHANGES[@]}"; do
             IFS=$'\t' read -r S A B <<< "$LINE"
-            FILE="$A"; [[ "$S" == R* ]] && FILE="$B"
+            FILE="$A"
+            [[ "$S" == R* ]] && FILE="$B"
+
             case "$S" in
-              M) STATUS="Modified" ;; A) STATUS="Added" ;; D) STATUS="Deleted" ;;
-              R*) STATUS="Renamed (${S#R})" ;; C*) STATUS="Copied (${S#C})" ;;
-              T) STATUS="Type changed" ;; U) STATUS="Unmerged" ;; X) STATUS="Unknown" ;; B) STATUS="Broken pairing" ;; *) STATUS="$S" ;;
+              M)   STATUS="Modified" ;;
+              A)   STATUS="Added" ;;
+              D)   STATUS="Deleted" ;;
+              R*)  PCT="${S#R}"; STATUS="Renamed (${PCT}%)" ;;
+              C*)  PCT="${S#C}"; STATUS="Copied (${PCT}%)" ;;
+              T)   STATUS="Type changed" ;;
+              U)   STATUS="Unmerged" ;;
+              X)   STATUS="Unknown" ;;
+              B)   STATUS="Broken pairing" ;;
+              *)   STATUS="$S" ;;
             esac
+
             echo "| $STATUS | \`$FILE\` |" >> "$GITHUB_STEP_SUMMARY"
           done
-          { echo; echo "### Diffs (normalized first, fallback to raw if empty)"; echo; } >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo
+            echo "### Diffs (normalized first, fallback to raw if empty)"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
           for LINE in "${CHANGES[@]}"; do
             IFS=$'\t' read -r S A B <<< "$LINE"
+
+            # Resolve paths for rename vs others
             BASE_PATH="$A"; HEAD_PATH="$A"; TITLE="$A"
-            if [[ "$S" == R* ]]; then BASE_PATH="$A"; HEAD_PATH="$B"; TITLE="$B"; fi
+            if [[ "$S" == R* ]]; then
+              BASE_PATH="$A"; HEAD_PATH="$B"; TITLE="$B"
+            fi
+
             echo "#### \`$TITLE\`" >> "$GITHUB_STEP_SUMMARY"
-            BASE_RAW="$(mkfile base_raw)"; HEAD_RAW="$(mkfile head_raw)"
+
+            # Extract contents (may be empty if add/delete)
+            BASE_RAW="$(mkfile base_raw)"
+            HEAD_RAW="$(mkfile head_raw)"
             git show "$BASE:$BASE_PATH" 2>/dev/null > "$BASE_RAW" || true
             git show "$HEAD:$HEAD_PATH" 2>/dev/null > "$HEAD_RAW" || true
-            BASE_NORM="$(mkfile base_json)"; HEAD_NORM="$(mkfile head_json)"
-            VB=1; VH=1
-            jq -S . < "$BASE_RAW" > "$BASE_NORM" 2>/dev/null || { VB=0; echo '{}' > "$BASE_NORM"; }
-            jq -S . < "$HEAD_RAW" > "$HEAD_NORM" 2>/dev/null || { VH=0; echo '{}' > "$HEAD_NORM"; }
+
+            # Normalize via jq -S . (fallback to {} if invalid)
+            BASE_NORM="$(mkfile base_json)"
+            HEAD_NORM="$(mkfile head_json)"
+            VALID_BASE=1; VALID_HEAD=1
+            if ! jq -S . < "$BASE_RAW" > "$BASE_NORM" 2>/dev/null; then VALID_BASE=0; echo '{}' > "$BASE_NORM"; fi
+            if ! jq -S . < "$HEAD_RAW" > "$HEAD_NORM" 2>/dev/null; then VALID_HEAD=0; echo '{}' > "$HEAD_NORM"; fi
+
+            # 1) Try normalized (structural) diff
             NORM_DIFF="$(mkfile norm_diff)"
-            if ! diff -u --label "$TITLE (base)" --label "$TITLE (head)" "$BASE_NORM" "$HEAD_NORM" > "$NORM_DIFF"; then
-              echo '```diff' >> "$GITHUB_STEP_SUMMARY"; truncate_or_all "$NORM_DIFF" >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
+            if ! diff -u --label "$TITLE (base)" --label "$TITLE (head)" \
+                   "$BASE_NORM" "$HEAD_NORM" > "$NORM_DIFF"; then
+              echo '```diff' >> "$GITHUB_STEP_SUMMARY"
+              truncate_or_all "$NORM_DIFF" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
             else
-              [[ $VB -eq 0 || $VH -eq 0 ]] && echo "_Note: one of the versions is not valid JSON — raw diff only._" >> "$GITHUB_STEP_SUMMARY"
-              echo "_No structural changes (after normalization)_" >> "$GITHUB_STEP_SUMMARY"; echo >> "$GITHUB_STEP_SUMMARY"
+              # 2) Fallback to raw textual diff (formatting-only or invalid JSON)
+              [[ $VALID_BASE -eq 0 || $VALID_HEAD -eq 0 ]] && \
+                echo "_Note: one of the versions is not valid JSON — raw diff only._" >> "$GITHUB_STEP_SUMMARY"
+              echo "_No structural changes (after normalization)_" >> "$GITHUB_STEP_SUMMARY"
+              echo >> "$GITHUB_STEP_SUMMARY"
+
               RAW_DIFF="$(mkfile raw_diff)"
-              diff -u --label "$TITLE (base)" --label "$TITLE (head)" "$BASE_RAW" "$HEAD_RAW" > "$RAW_DIFF" || true
+              diff -u --label "$TITLE (base)" --label "$TITLE (head)" \
+                   "$BASE_RAW" "$HEAD_RAW" > "$RAW_DIFF" || true
+
               echo "_Showing raw textual diff (formatting/whitespace changes may appear)_" >> "$GITHUB_STEP_SUMMARY"
-              echo '```diff' >> "$GITHUB_STEP_SUMMARY"; truncate_or_all "$RAW_DIFF" >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
+              echo '```diff' >> "$GITHUB_STEP_SUMMARY"
+              truncate_or_all "$RAW_DIFF" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
             fi
+
             echo >> "$GITHUB_STEP_SUMMARY"
           done
-          cat "$GITHUB_STEP_SUMMARY" > report.md
 
-      - name: Build report (tarball mode)
-        if: ${{ github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          REPO="${{ steps.meta.outputs.repo }}"
-          BASE="${{ steps.apitags.outputs.base }}"
-          HEAD="${{ steps.apitags.outputs.head }}"
-          mkdir -p /tmp/base /tmp/head
-          curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -L "https://api.github.com/repos/${REPO}/tarball/${BASE}" -o /tmp/base.tgz
-          tar -xzf /tmp/base.tgz -C /tmp/base
-          BASE_DIR="$(find /tmp/base -mindepth 1 -maxdepth 1 -type d | head -n1)"
-          curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -L "https://api.github.com/repos/${REPO}/tarball/${HEAD}" -o /tmp/head.tgz
-          tar -xzf /tmp/head.tgz -C /tmp/head
-          HEAD_DIR="$(find /tmp/head -mindepth 1 -maxdepth 1 -type d | head -n1)"
-          BASE_R="${BASE_DIR}/ramls"; HEAD_R="${HEAD_DIR}/ramls"
-          : > /tmp/base_list; : > /tmp/head_list
-          if [[ -d "$BASE_R" ]]; then find "$BASE_R" -maxdepth 1 -type f -name '*.json' -printf '%f\n' | sort > /tmp/base_list; fi
-          if [[ -d "$HEAD_R" ]]; then find "$HEAD_R" -maxdepth 1 -type f -name '*.json' -printf '%f\n' | sort > /tmp/head_list; fi
-          { echo "## JSON Schema Changes"; echo; echo "- Base: \`$BASE\`"; echo "- Head: \`$HEAD\`"; echo; } >> "$GITHUB_STEP_SUMMARY"
-          if [[ ! -s /tmp/base_list && ! -s /tmp/head_list ]]; then
-            echo "_No JSON schema changes detected in \`ramls/\` (top-level)._ " >> "$GITHUB_STEP_SUMMARY"
-            cat "$GITHUB_STEP_SUMMARY" > report.md
-            exit 0
-          fi
-          { echo "### Changed files"; echo; echo "| Status | File (HEAD) |"; echo "|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
-          comm -13 /tmp/base_list /tmp/head_list | while read -r f; do [[ -n "$f" ]] && echo "| Added | \`$f\` |" >> "$GITHUB_STEP_SUMMARY"; done
-          comm -23 /tmp/base_list /tmp/head_list | while read -r f; do [[ -n "$f" ]] && echo "| Deleted | \`$f\` |" >> "$GITHUB_STEP_SUMMARY"; done
-          comm -12 /tmp/base_list /tmp/head_list > /tmp/common_list || true
-          mkdir -p /tmp/base_norm /tmp/head_norm
-          if [[ -s /tmp/common_list ]]; then
-            while read -r f; do
-              [[ -z "$f" ]] && continue
-              jq -S . "$BASE_R/$f" 2>/dev/null > "/tmp/base_norm/$f" || echo '{}' > "/tmp/base_norm/$f"
-              jq -S . "$HEAD_R/$f" 2>/dev/null > "/tmp/head_norm/$f" || echo '{}' > "/tmp/head_norm/$f"
-              if ! cmp -s "/tmp/base_norm/$f" "/tmp/head_norm/$f"; then
-                echo "| Modified | \`$f\` |" >> "$GITHUB_STEP_SUMMARY"
-              fi
-            done < /tmp/common_list
-            echo >> "$GITHUB_STEP_SUMMARY"
-            echo "### Diffs (normalized JSON)" >> "$GITHUB_STEP_SUMMARY"
-            while read -r f; do
-              [[ -z "$f" ]] && continue
-              echo "#### \`$f\`" >> "$GITHUB_STEP_SUMMARY"
-              if diff -u --label "$f (base)" --label "$f (head)" "/tmp/base_norm/$f" "/tmp/head_norm/$f" > /tmp/d.out; then
-                echo "_No structural changes (after normalization)_" >> "$GITHUB_STEP_SUMMARY"
-              else
-                echo '```diff' >> "$GITHUB_STEP_SUMMARY"
-                cat /tmp/d.out >> "$GITHUB_STEP_SUMMARY"
-                echo '```' >> "$GITHUB_STEP_SUMMARY"
-              fi
-              echo >> "$GITHUB_STEP_SUMMARY"
-            done < /tmp/common_list
-          fi
+          # create report.md with final summary when changes exist
           cat "$GITHUB_STEP_SUMMARY" > report.md
 
       - name: Ensure report exists
