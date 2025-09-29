@@ -65,11 +65,26 @@ jobs:
               BASE="${BASE_IN:-$PREV_TAG}"
               ;;
             workflow_dispatch)
-              HEAD="${HEAD_IN:-${GITHUB_SHA}}"
-              if [[ -n "$BASE_IN" ]]; then
-                BASE="$BASE_IN"
+              if [[ -n "$BASE_IN" || -n "$HEAD_IN" ]]; then
+                HEAD="${HEAD_IN:-${GITHUB_SHA}}"
+                BASE="${BASE_IN:-$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD | tail -n1)}"
               else
-                BASE="$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD | tail -n1)"
+                latest_commit="$(git rev-list --tags --max-count=1 || true)"
+                if [[ -n "$latest_commit" ]]; then
+                  latest_tag="$(git describe --tags "$latest_commit")"
+                  prev_commit="$(git rev-list --tags --skip=1 --max-count=1 || true)"
+                  if [[ -n "$prev_commit" ]]; then
+                    previous_tag="$(git describe --tags "$prev_commit")"
+                    HEAD="$latest_tag"
+                    BASE="$previous_tag"
+                  else
+                    HEAD="$latest_tag"
+                    BASE="$(git rev-list --max-parents=0 HEAD | tail -n1)"
+                  fi
+                else
+                  HEAD="${GITHUB_SHA}"
+                  BASE="$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD | tail -n1)"
+                fi
               fi
               ;;
             *)
