@@ -32,13 +32,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          WF_REF="${{ github.workflow_ref }}" # пример: owner/repo/.github/workflows/file.yml@refs/heads/main
+          WF_REF="${{ github.workflow_ref }}"
           if [[ -n "$WF_REF" && "$WF_REF" == *"/.github/workflows/"* && "$WF_REF" == *"@"* ]]; then
             CALLED_REPO="${WF_REF%%/.github/workflows/*}"
             CALLED_REF="${WF_REF#*@}"
           else
             CALLED_REPO="${{ github.repository }}"
-            CALLED_REF="${{ github.sha }}"
+            CALLED_REF="${{ github.ref }}"
           fi
           echo "repo=$CALLED_REPO" >> "$GITHUB_OUTPUT"
           echo "ref=$CALLED_REF"   >> "$GITHUB_OUTPUT"
@@ -56,7 +56,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git config --global gc.auto 0
           git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/${{ steps.meta.outputs.repo }}.git"
           git fetch --prune --force origin \
             "+refs/heads/*:refs/remotes/origin/*" \
@@ -67,6 +66,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          # Функция: взять последний и предпоследний теги по времени создания
+          latest_two_tags() {
+            git for-each-ref --sort=-creatordate --format '%(refname:short)' refs/tags | sed -n '1p;2p'
+          }
+
           case "${{ github.event_name }}" in
             push)
               BASE="${{ github.event.before }}"
@@ -79,35 +84,35 @@ jobs:
             release)
               CUR_TAG="${{ github.event.release.tag_name }}"
               HEAD="$CUR_TAG"
-              PREV_TAG="$(git tag --sort=-creatordate | grep -A1 "^${CUR_TAG}$" | tail -n1 || true)"
-              [[ -z "$PREV_TAG" ]] && PREV_TAG="$(git tag --sort=creatordate | head -n1 || true)"
-              [[ -z "$PREV_TAG" ]] && PREV_TAG="$(git rev-list --max-parents=0 HEAD | tail -n1)"
+              PREV_TAG="$(git for-each-ref --sort=-creatordate --format '%(refname:short)' refs/tags | awk -v cur="$CUR_TAG" 'f==1{print; exit} {if($0==cur) f=1} END{if(f!=1) exit 0}')" || true
+              if [[ -z "${PREV_TAG:-}" ]]; then
+                PREV_TAG="$(git for-each-ref --sort=creatordate --format '%(refname:short)' refs/tags | head -n1 || true)"
+              fi
+              if [[ -z "${PREV_TAG:-}" ]]; then
+                echo "No previous tag found to compare with $CUR_TAG" >&2
+                exit 1
+              fi
               BASE="$PREV_TAG"
               ;;
             workflow_dispatch|workflow_call)
-              latest_commit="$(git rev-list --tags --max-count=1 || true)"
-              if [[ -n "$latest_commit" ]]; then
-                latest_tag="$(git describe --tags "$latest_commit")"
-                prev_commit="$(git rev-list --tags --skip=1 --max-count=1 || true)"
-                if [[ -n "$prev_commit" ]]; then
-                  previous_tag="$(git describe --tags "$prev_commit")"
-                  HEAD="$latest_tag"
-                  BASE="$previous_tag"
-                else
-                  HEAD="$latest_tag"
-                  BASE="$(git rev-list --max-parents=0 HEAD | tail -n1)"
-                fi
-              else
-                HEAD="${GITHUB_SHA}"
-                BASE="$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD | tail -n1)"
+              mapfile -t TAGS < <(latest_two_tags)
+              if (( ${#TAGS[@]} < 2 )); then
+                echo "Need at least two tags in repo to generate report for workflow_dispatch/workflow_call." >&2
+                echo "Found tags: ${TAGS[*]:-none}" >&2
+                exit 1
               fi
+              HEAD="${TAGS[0]}"
+              BASE="${TAGS[1]}"
               ;;
             *)
-              HEAD="${GITHUB_SHA}"
               BASE="$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD | tail -n1)"
+              HEAD="$(git rev-parse HEAD)"
               ;;
           esac
-          git rev-parse "$BASE" "$HEAD" >/dev/null
+
+          git rev-parse "$BASE" >/dev/null 2>&1 || { echo "Base ref not resolvable: $BASE" >&2; exit 1; }
+          git rev-parse "$HEAD" >/dev/null 2>&1 || { echo "Head ref not resolvable: $HEAD" >&2; exit 1; }
+
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
           echo "head=$HEAD" >> "$GITHUB_OUTPUT"
 
