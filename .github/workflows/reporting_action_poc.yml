@@ -6,19 +6,15 @@ on:
     paths:
       - "ramls/*.json"
   pull_request:
+    types: [opened, synchronize, reopened]
     branches: ["**"]
     paths:
       - "ramls/*.json"
+
   release:
     types: [created, published]
-  workflow_dispatch:
-    inputs:
-      base:
-        description: "Optional base ref (tag/commit)"
-        required: false
-      head:
-        description: "Optional head ref (tag/commit)"
-        required: false
+
+  workflow_dispatch: {}
 
 permissions:
   contents: read
