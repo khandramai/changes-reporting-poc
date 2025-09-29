@@ -11,14 +11,6 @@ on:
       - "ramls/*.json"
   release:
     types: [created, published]
-  workflow_dispatch:
-    inputs:
-      base:
-        description: "Optional base ref (tag/commit)"
-        required: false
-      head:
-        description: "Optional head ref (tag/commit)"
-        required: false
 
 permissions:
   contents: read
