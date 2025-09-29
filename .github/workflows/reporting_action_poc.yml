@@ -19,6 +19,16 @@ on:
       head:
         description: "Optional head ref (tag/commit)"
         required: false
+  workflow_call:
+    inputs:
+      base:
+        description: "Optional base ref (tag/commit)"
+        required: false
+        type: string
+      head:
+        description: "Optional head ref (tag/commit)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -44,8 +54,16 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          BASE_IN="${{ github.event.inputs.base || '' }}"
-          HEAD_IN="${{ github.event.inputs.head || '' }}"
+          BASE_IN=""
+          HEAD_IN=""
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            BASE_IN="${{ github.event.inputs.base || '' }}"
+            HEAD_IN="${{ github.event.inputs.head || '' }}"
+          elif [[ "${{ github.event_name }}" == "workflow_call" ]]; then
+            BASE_IN="${{ inputs.base || '' }}"
+            HEAD_IN="${{ inputs.head || '' }}"
+          fi
 
           case "${{ github.event_name }}" in
             push)
@@ -64,7 +82,7 @@ jobs:
               [[ -z "$PREV_TAG" ]] && PREV_TAG="$(git rev-list --max-parents=0 HEAD | tail -n1)"
               BASE="${BASE_IN:-$PREV_TAG}"
               ;;
-            workflow_dispatch)
+            workflow_dispatch|workflow_call)
               if [[ -n "$BASE_IN" || -n "$HEAD_IN" ]]; then
                 HEAD="${HEAD_IN:-${GITHUB_SHA}}"
                 BASE="${BASE_IN:-$(git rev-parse HEAD~1 2>/dev/null || git rev-list --max-parents=0 HEAD | tail -n1)}"
