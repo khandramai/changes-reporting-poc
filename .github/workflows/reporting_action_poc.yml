@@ -47,6 +47,8 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          repository: khandramai/changes-reporting-poc
+          ref: main
 
       - name: Determine BASE/HEAD
         id: refs
