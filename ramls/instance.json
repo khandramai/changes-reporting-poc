@@ -20,10 +20,6 @@
       "type": "string",
       "description": "New field"
     },
-    "matchKey": {
-      "type": "string",
-      "description" : "A unique instance identifier matching a client-side bibliographic record identification scheme, in particular for a scenario where multiple separate catalogs with no shared record identifiers contribute to the same Instance in Inventory. A match key is typically generated from select, normalized pieces of metadata in bibliographic records"
-    },
     "sourceUri": {
       "type": "string",
       "description": "A remote URI uniquely identifying the source of the instance"
